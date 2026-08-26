@@ -1,0 +1,2359 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#050510">
+
+    <title>Flappy Rocket Mobile</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #1a1a2e;
+            touch-action: none;
+            position: fixed;
+        }
+
+        #gameContainer {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            width: 100vw;
+            height: 100vh;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        }
+
+        canvas {
+            display: block;
+            max-width: 100vw;
+            max-height: 100vh;
+            width: auto;
+            height: auto;
+            aspect-ratio: 9 / 16;
+            background-color: #0a0a1a;
+            border-radius: 12px;
+            box-shadow: 0 0 40px rgba(0, 0, 0, 0.8), 0 0 80px rgba(0, 0, 0, 0.4);
+            border: 2px solid rgba(255, 255, 255, 0.05);
+        }
+
+        @media (min-aspect-ratio: 1/1) {
+            canvas {
+                max-height: 100vh;
+                max-width: calc(100vh * 9 / 16);
+                width: auto;
+                height: 100vh;
+            }
+        }
+
+        @media (max-aspect-ratio: 1/1) {
+            canvas {
+                max-width: 100vw;
+                max-height: calc(100vw * 16 / 9);
+                width: 100vw;
+                height: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <canvas id="gameCanvas"></canvas>
+    </div>
+
+    <script>
+        // === POLYFILL для roundRect ===
+        if (!CanvasRenderingContext2D.prototype.roundRect) {
+            CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, radii) {
+                const r = typeof radii === 'number' ? radii : (radii || 0);
+                this.moveTo(x + r, y);
+                this.lineTo(x + w - r, y);
+                this.quadraticCurveTo(x + w, y, x + w, y + r);
+                this.lineTo(x + w, y + h - r);
+                this.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+                this.lineTo(x + r, y + h);
+                this.quadraticCurveTo(x, y + h, x, y + h - r);
+                this.lineTo(x, y + r);
+                this.quadraticCurveTo(x, y, x + r, y);
+                this.closePath();
+                return this;
+            };
+        }
+
+        // === СИСТЕМА ТАБЛИЦЫ ЛИДЕРОВ (PHP) ===
+        const LEADERBOARD_URL = 'http://127.0.0.1:5500/leaderboard.php';
+
+        let leaderboardData = [];
+        let leaderboardLoading = false;
+        let leaderboardError = '';
+
+        async function loadLeaderboard() {
+            leaderboardLoading = true;
+            leaderboardError = '';
+            
+            try {
+                const response = await fetch(LEADERBOARD_URL, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                if (data && data.players) {
+                    leaderboardData = data.players;
+                } else {
+                    leaderboardData = [];
+                }
+                
+                // Сортируем по очкам
+                leaderboardData.sort((a, b) => (b.score || 0) - (a.score || 0));
+                
+            } catch (error) {
+                console.error('Error loading leaderboard:', error);
+                leaderboardError = 'Ошибка загрузки таблицы лидеров';
+                // Пробуем загрузить локальную копию
+                loadLocalLeaderboard();
+            }
+            
+            leaderboardLoading = false;
+        }
+
+        async function saveLeaderboardToServer(username, score, coins) {
+            try {
+                const response = await fetch(LEADERBOARD_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        username: username,
+                        score: score || 0,
+                        coins: coins || 0
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                if (result && result.success) {
+                    await loadLeaderboard();
+                    return true;
+                } else {
+                    throw new Error('Server returned error');
+                }
+            } catch (error) {
+                console.error('Error saving to leaderboard:', error);
+                // Сохраняем локально в случае ошибки
+                saveLocalLeaderboard();
+                return false;
+            }
+        }
+
+        function updateLeaderboard(username, score, coins) {
+            if (!username) return;
+            
+            // Обновляем локальные данные
+            const existingIndex = leaderboardData.findIndex(p => p.username === username);
+            
+            if (existingIndex !== -1) {
+                if (score > (leaderboardData[existingIndex].score || 0)) {
+                    leaderboardData[existingIndex].score = score;
+                    leaderboardData[existingIndex].coins = coins || 0;
+                    leaderboardData[existingIndex].lastUpdate = Date.now();
+                }
+            } else {
+                leaderboardData.push({
+                    username: username,
+                    score: score || 0,
+                    coins: coins || 0,
+                    lastUpdate: Date.now()
+                });
+            }
+            
+            // Сортируем и ограничиваем
+            leaderboardData.sort((a, b) => (b.score || 0) - (a.score || 0));
+            if (leaderboardData.length > 100) {
+                leaderboardData = leaderboardData.slice(0, 100);
+            }
+            
+            saveLocalLeaderboard();
+            
+            // Отправляем на сервер
+            saveLeaderboardToServer(username, score, coins);
+        }
+
+        function saveLocalLeaderboard() {
+            try {
+                localStorage.setItem('flappy_rocket_leaderboard_local', JSON.stringify(leaderboardData));
+            } catch (e) {
+                console.error('Failed to save local leaderboard:', e);
+            }
+        }
+
+        function loadLocalLeaderboard() {
+            try {
+                const data = localStorage.getItem('flappy_rocket_leaderboard_local');
+                if (data) {
+                    const parsed = JSON.parse(data);
+                    leaderboardData = Array.isArray(parsed) ? parsed : [];
+                    leaderboardData.sort((a, b) => (b.score || 0) - (a.score || 0));
+                } else {
+                    leaderboardData = [];
+                }
+            } catch (e) {
+                console.error('Failed to load local leaderboard:', e);
+                leaderboardData = [];
+            }
+        }
+
+        // === СИСТЕМА ЛОКАЛИЗАЦИИ ===
+        const LANGUAGES = ['ru', 'en', 'be', 'es'];
+        let currentLanguage = localStorage.getItem('flappy_rocket_lang') || 'ru';
+        let langSwitchCooldown = 0;
+
+        const LOCALES = {
+            ru: {
+                coins: 'Монеты: {0}',
+                fuel: 'Топливо: {0}',
+                skin: 'Скин: {0}',
+                score: 'Очки: {0}',
+                best: 'Лучшее: {0}',
+                
+                play: 'ИГРАТЬ',
+                shop: 'МАГАЗИН',
+                skins: 'СКИНЫ',
+                settings: 'НАСТРОЙКИ',
+                leaderboard: 'ТАБЛИЦА ЛИДЕРОВ',
+                title: 'FLAPPY ROCKET',
+                
+                settings_title: 'НАСТРОЙКИ',
+                music: 'Музыка: {0}%',
+                effects: 'Эффекты: {0}%',
+                language: 'Язык: {0}',
+                logout: 'ВЫЙТИ ИЗ АККАУНТА',
+                back: 'НАЗАД',
+                confirm_logout: 'Нажмите ещё раз для выхода',
+                
+                shop_title: 'МАГАЗИН',
+                buy_tank: 'ОБНОВИТЬ БАК (10)',
+                buy_inv: 'УЛУЧШИТЬ ИНВЕНТАРЬ ({0})',
+                tank_active: 'БАК ({0})',
+                inv_active: 'ИНВЕНТАРЬ ({0})',
+                next: 'ДАЛЕЕ',
+                all_skins_bought: 'А ты прям задрот, раз столько накопил... молодцом!!',
+                
+                skins_title: 'СКИНЫ',
+                skin_shop_title: 'МАГАЗИН СКИНОВ',
+                default_skin: 'Обычная',
+                cartoon_skin: 'Мультяшная Ракета',
+                rainbow_skin: 'Радужная Ракета',
+                nyan_skin: 'НЯН-РОКЕТ',
+                skin_price: '{0} ({1})',
+                
+                tap_to_start: 'НАЖМИТЕ ДЛЯ СТАРТА',
+                game_over: 'ИГРА ОКОНЧЕНА',
+                tap_to_restart: 'НАЖМИТЕ ДЛЯ ПЕРЕЗАПУСКА',
+                pause: 'ПАУЗА',
+                resume: 'ПРОДОЛЖИТЬ',
+                to_menu: 'В МЕНЮ',
+                
+                login_title: 'ВХОД В АККАУНТ',
+                register_title: 'РЕГИСТРАЦИЯ',
+                login_sub: 'Войдите в существующий аккаунт',
+                register_sub: 'Создайте новый аккаунт',
+                login_btn: 'ВОЙТИ',
+                register_btn: 'ЗАРЕГИСТРИРОВАТЬСЯ',
+                to_login: 'ВОЙТИ В АККАУНТ',
+                to_register: 'ЗАРЕГИСТРИРОВАТЬСЯ',
+                login_error: 'Неверное имя или пароль!',
+                register_error_username: 'Это имя уже занято!',
+                register_error_chars: 'Пароль содержит недопустимые символы!',
+                register_error_length: 'Пароль должен быть минимум 6 символов!',
+                register_error_name_length: 'Имя должно быть минимум 2 символа!',
+                register_error_match: 'Пароли не совпадают!',
+                register_error_general: 'Ошибка создания аккаунта!',
+                
+                leaderboard_title: 'ТАБЛИЦА ЛИДЕРОВ',
+                leaderboard_rank: 'Место',
+                leaderboard_player: 'Игрок',
+                leaderboard_score: 'Очки',
+                leaderboard_coins: 'Монеты',
+                leaderboard_refresh: 'ОБНОВИТЬ',
+                leaderboard_loading: 'Загрузка...',
+                leaderboard_error: 'Ошибка загрузки',
+                leaderboard_empty: 'Нет данных'
+            },
+            en: {
+                coins: 'Coins: {0}',
+                fuel: 'Fuel: {0}',
+                skin: 'Skin: {0}',
+                score: 'Score: {0}',
+                best: 'Best: {0}',
+                
+                play: 'PLAY',
+                shop: 'SHOP',
+                skins: 'SKINS',
+                settings: 'SETTINGS',
+                leaderboard: 'LEADERBOARD',
+                title: 'FLAPPY ROCKET',
+                
+                settings_title: 'SETTINGS',
+                music: 'Music: {0}%',
+                effects: 'Effects: {0}%',
+                language: 'Language: {0}',
+                logout: 'LOGOUT',
+                back: 'BACK',
+                confirm_logout: 'Click again to logout',
+                
+                shop_title: 'SHOP',
+                buy_tank: 'UPGRADE TANK (10)',
+                buy_inv: 'UPGRADE INVENTORY ({0})',
+                tank_active: 'TANK ({0})',
+                inv_active: 'INVENTORY ({0})',
+                next: 'NEXT',
+                all_skins_bought: "You're a real grinder... well done!!",
+                
+                skins_title: 'SKINS',
+                skin_shop_title: 'SKIN SHOP',
+                default_skin: 'Default',
+                cartoon_skin: 'Cartoon Rocket',
+                rainbow_skin: 'Rainbow Rocket',
+                nyan_skin: 'NYAN-ROCKET',
+                skin_price: '{0} ({1})',
+                
+                tap_to_start: 'TAP TO START',
+                game_over: 'GAME OVER',
+                tap_to_restart: 'TAP TO RESTART',
+                pause: 'PAUSE',
+                resume: 'RESUME',
+                to_menu: 'TO MENU',
+                
+                login_title: 'LOGIN',
+                register_title: 'REGISTER',
+                login_sub: 'Login to existing account',
+                register_sub: 'Create new account',
+                login_btn: 'LOGIN',
+                register_btn: 'REGISTER',
+                to_login: 'LOGIN',
+                to_register: 'REGISTER',
+                login_error: 'Invalid username or password!',
+                register_error_username: 'Username already taken!',
+                register_error_chars: 'Password contains invalid characters!',
+                register_error_length: 'Password must be at least 6 characters!',
+                register_error_name_length: 'Username must be at least 2 characters!',
+                register_error_match: 'Passwords do not match!',
+                register_error_general: 'Account creation error!',
+                
+                leaderboard_title: 'LEADERBOARD',
+                leaderboard_rank: 'Rank',
+                leaderboard_player: 'Player',
+                leaderboard_score: 'Score',
+                leaderboard_coins: 'Coins',
+                leaderboard_refresh: 'REFRESH',
+                leaderboard_loading: 'Loading...',
+                leaderboard_error: 'Loading error',
+                leaderboard_empty: 'No data'
+            },
+            be: {
+                coins: 'Манеты: {0}',
+                fuel: 'Паліва: {0}',
+                skin: 'Скін: {0}',
+                score: 'Ачкі: {0}',
+                best: 'Лепшае: {0}',
+                
+                play: 'ГУЛЯЦЬ',
+                shop: 'КРАМА',
+                skins: 'СКІНЫ',
+                settings: 'НАЛАДЫ',
+                leaderboard: 'ТАБЛІЦА ЛІДЭРАЎ',
+                title: 'FLAPPY ROCKET',
+                
+                settings_title: 'НАЛАДЫ',
+                music: 'Музыка: {0}%',
+                effects: 'Эфекты: {0}%',
+                language: 'Мова: {0}',
+                logout: 'ВЫЙСЦІ З АКАУНТА',
+                back: 'НАЗАД',
+                confirm_logout: 'Націсніце яшчэ раз для выхаду',
+                
+                shop_title: 'КРАМА',
+                buy_tank: 'АБНАВІЦЬ БАК (10)',
+                buy_inv: 'ПАЛЕПШЫЦЬ ІНВЕНТАР ({0})',
+                tank_active: 'БАК ({0})',
+                inv_active: 'ІНВЕНТАР ({0})',
+                next: 'ДАЛЕЙ',
+                all_skins_bought: 'А ты прамой задрот, раз столькі накапіў... малайчына!!',
+                
+                skins_title: 'СКІНЫ',
+                skin_shop_title: 'КРАМА СКІНАЎ',
+                default_skin: 'Звычайная',
+                cartoon_skin: 'Мульцяшная Ракета',
+                rainbow_skin: 'Вясёлкавая Ракета',
+                nyan_skin: 'НЯН-РОКЕТ',
+                skin_price: '{0} ({1})',
+                
+                tap_to_start: 'НАЦІСНІЦЕ ДЛЯ СТАРТУ',
+                game_over: 'ГУЛЬНЯ СКОНЧАНА',
+                tap_to_restart: 'НАЦІСНІЦЕ ДЛЯ ПЕРАЗАПУСКУ',
+                pause: 'ПАУЗА',
+                resume: 'ПРАЦЯГВАЦЬ',
+                to_menu: 'У МЕНЮ',
+                
+                login_title: 'УВАХОД У АКАУНТ',
+                register_title: 'РЭГІСТРАЦЫЯ',
+                login_sub: 'Увайдзіце ў існуючы акаўнт',
+                register_sub: 'Стварыце новы акаўнт',
+                login_btn: 'УВАЙСЦІ',
+                register_btn: 'ЗАРЭГІСТРАВАНЦА',
+                to_login: 'УВАЙСЦІ Ў АКАУНТ',
+                to_register: 'ЗАРЭГІСТРАВАНЦА',
+                login_error: 'Няправільнае імя ці пароль!',
+                register_error_username: 'Гэта імя ўжо занятае!',
+                register_error_chars: 'Пароль змяшчае недапушчальныя сімвалы!',
+                register_error_length: 'Пароль павінен быць мінімум 6 сімвалаў!',
+                register_error_name_length: 'Імя павінна быць мінімум 2 сімвалы!',
+                register_error_match: 'Паролі не супадаюць!',
+                register_error_general: 'Памылка стварэння акаўнта!',
+                
+                leaderboard_title: 'ТАБЛІЦА ЛІДЭРАЎ',
+                leaderboard_rank: 'Месца',
+                leaderboard_player: 'Гулец',
+                leaderboard_score: 'Ачкі',
+                leaderboard_coins: 'Манеты',
+                leaderboard_refresh: 'АБНАВІЦЬ',
+                leaderboard_loading: 'Загрузка...',
+                leaderboard_error: 'Памылка загрузкі',
+                leaderboard_empty: 'Няма дадзеных'
+            },
+            es: {
+                coins: 'Monedas: {0}',
+                fuel: 'Combustible: {0}',
+                skin: 'Skin: {0}',
+                score: 'Puntuación: {0}',
+                best: 'Mejor: {0}',
+                
+                play: 'JUGAR',
+                shop: 'TIENDA',
+                skins: 'SKINS',
+                settings: 'AJUSTES',
+                leaderboard: 'CLASIFICACIÓN',
+                title: 'FLAPPY ROCKET',
+                
+                settings_title: 'AJUSTES',
+                music: 'Música: {0}%',
+                effects: 'Efectos: {0}%',
+                language: 'Idioma: {0}',
+                logout: 'CERRAR SESIÓN',
+                back: 'VOLVER',
+                confirm_logout: 'Haga clic de nuevo para salir',
+                
+                shop_title: 'TIENDA',
+                buy_tank: 'MEJORAR TANQUE (10)',
+                buy_inv: 'MEJORAR INVENTARIO ({0})',
+                tank_active: 'TANQUE ({0})',
+                inv_active: 'INVENTARIO ({0})',
+                next: 'SIGUIENTE',
+                all_skins_bought: 'Eres un verdadero grindmaster... ¡bien hecho!!',
+                
+                skins_title: 'SKINS',
+                skin_shop_title: 'TIENDA DE SKINS',
+                default_skin: 'Normal',
+                cartoon_skin: 'Cohete Animado',
+                rainbow_skin: 'Cohete Arcoíris',
+                nyan_skin: 'NYAN-ROCKET',
+                skin_price: '{0} ({1})',
+                
+                tap_to_start: 'TOQUE PARA EMPEZAR',
+                game_over: 'JUEGO TERMINADO',
+                tap_to_restart: 'TOQUE PARA REINICIAR',
+                pause: 'PAUSA',
+                resume: 'CONTINUAR',
+                to_menu: 'AL MENÚ',
+                
+                login_title: 'INICIAR SESIÓN',
+                register_title: 'REGISTRARSE',
+                login_sub: 'Inicie sesión en una cuenta existente',
+                register_sub: 'Cree una nueva cuenta',
+                login_btn: 'INICIAR SESIÓN',
+                register_btn: 'REGISTRARSE',
+                to_login: 'INICIAR SESIÓN',
+                to_register: 'REGISTRARSE',
+                login_error: '¡Nombre o contraseña incorrectos!',
+                register_error_username: '¡Este nombre ya está en uso!',
+                register_error_chars: '¡La contraseña contiene caracteres no válidos!',
+                register_error_length: '¡La contraseña debe tener al menos 6 caracteres!',
+                register_error_name_length: '¡El nombre debe tener al menos 2 caracteres!',
+                register_error_match: '¡Las contraseñas no coinciden!',
+                register_error_general: '¡Error al crear la cuenta!',
+                
+                leaderboard_title: 'CLASIFICACIÓN',
+                leaderboard_rank: 'Posición',
+                leaderboard_player: 'Jugador',
+                leaderboard_score: 'Puntuación',
+                leaderboard_coins: 'Monedas',
+                leaderboard_refresh: 'ACTUALIZAR',
+                leaderboard_loading: 'Cargando...',
+                leaderboard_error: 'Error de carga',
+                leaderboard_empty: 'Sin datos'
+            }
+        };
+
+        function getLang() {
+            return currentLanguage;
+        }
+
+        function setLanguage(lang) {
+            if (Date.now() < langSwitchCooldown) return;
+            if (LANGUAGES.includes(lang)) {
+                currentLanguage = lang;
+                localStorage.setItem('flappy_rocket_lang', lang);
+                langSwitchCooldown = Date.now() + 5;
+                updateMenuButtons();
+                updateLoginButtons();
+                updateSkinsShopButtons();
+            }
+        }
+
+        function switchLanguage() {
+            let currentIndex = LANGUAGES.indexOf(currentLanguage);
+            let nextIndex = (currentIndex + 1) % LANGUAGES.length;
+            setLanguage(LANGUAGES[nextIndex]);
+        }
+
+        function t(key, ...args) {
+            const lang = getLang();
+            let text = LOCALES[lang]?.[key] || LOCALES['ru'][key] || key;
+            if (args.length > 0) {
+                text = text.replace(/\{(\d+)\}/g, (match, index) => {
+                    return args[parseInt(index)] !== undefined ? args[parseInt(index)] : match;
+                });
+            }
+            return text;
+        }
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        document.addEventListener('gesturestart', (e) => e.preventDefault());
+        document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+
+        window.history.pushState({ page: 1 }, "", "");
+
+        function closeTab() {
+            window.close();
+            document.body.innerHTML = "<div style='color:white; font-family:Arial; text-align:center; margin-top:30%; font-size:22px;'>Session ended.</div>";
+        }
+
+        window.addEventListener('popstate', function () {
+            closeTab();
+        });
+
+        // === СИСТЕМА АККАУНТОВ ===
+        let currentUser = null;
+        let accounts = {};
+
+        function loadAccounts() {
+            try {
+                const data = localStorage.getItem('flappy_rocket_accounts');
+                if (data) accounts = JSON.parse(data);
+            } catch (e) {
+                accounts = {};
+            }
+        }
+
+        function saveAccounts() {
+            localStorage.setItem('flappy_rocket_accounts', JSON.stringify(accounts));
+        }
+
+        function getUserData(username) {
+            if (accounts[username]) {
+                return accounts[username];
+            }
+            return null;
+        }
+
+        function createAccount(username, password) {
+            if (accounts[username]) return false;
+            
+            accounts[username] = {
+                password: password,
+                coins: 0,
+                currentSkin: 'default',
+                purchasedSkins: ['default'],
+                fuelUpgradeExpire: 0,
+                inventoryUpgradeExpire: 0,
+                inventoryUpgradePrice: 5,
+                musicVol: 0.5,
+                sfxVol: 0.5,
+                bestScore: 0
+            };
+            saveAccounts();
+            return true;
+        }
+
+        function loginAccount(username, password) {
+            if (accounts[username] && accounts[username].password === password) {
+                return accounts[username];
+            }
+            return null;
+        }
+
+        function saveUserProgress() {
+            if (!currentUser || !accounts[currentUser]) return;
+            accounts[currentUser].coins = coins;
+            accounts[currentUser].currentSkin = currentSkin;
+            accounts[currentUser].purchasedSkins = purchasedSkins;
+            accounts[currentUser].fuelUpgradeExpire = fuelUpgradeExpireTime;
+            accounts[currentUser].inventoryUpgradeExpire = inventoryUpgradeExpireTime;
+            accounts[currentUser].inventoryUpgradePrice = inventoryUpgradePrice;
+            accounts[currentUser].musicVol = bgMusicVolume;
+            accounts[currentUser].sfxVol = sfxVolume;
+            accounts[currentUser].bestScore = bestScore;
+            saveAccounts();
+            
+            updateLeaderboard(currentUser, bestScore, coins);
+        }
+
+        function loadUserProgress(username) {
+            const data = getUserData(username);
+            if (!data) return false;
+            
+            coins = data.coins || 0;
+            currentSkin = data.currentSkin || 'default';
+            purchasedSkins = data.purchasedSkins || ['default'];
+            fuelUpgradeExpireTime = data.fuelUpgradeExpire || 0;
+            inventoryUpgradeExpireTime = data.inventoryUpgradeExpire || 0;
+            inventoryUpgradePrice = data.inventoryUpgradePrice || 5;
+            bgMusicVolume = data.musicVol !== undefined ? data.musicVol : 0.5;
+            sfxVolume = data.sfxVol !== undefined ? data.sfxVol : 0.5;
+            bestScore = data.bestScore || 0;
+            
+            for (let skinId in SKINS) {
+                SKINS[skinId].purchased = purchasedSkins.includes(SKINS[skinId].id);
+            }
+            
+            saveCoins();
+            saveSkinData();
+            saveUpgradeExpire();
+            saveInventoryUpgrade();
+            saveSettings();
+            
+            updateLeaderboard(username, bestScore, coins);
+            
+            return true;
+        }
+
+        function logoutAccount() {
+            if (currentUser) {
+                saveUserProgress();
+                currentUser = null;
+                coins = 0;
+                currentSkin = 'default';
+                purchasedSkins = ['default'];
+                fuelUpgradeExpireTime = 0;
+                inventoryUpgradeExpireTime = 0;
+                inventoryUpgradePrice = 5;
+                bgMusicVolume = 0.5;
+                sfxVolume = 0.5;
+                bestScore = 0;
+                for (let skinId in SKINS) {
+                    SKINS[skinId].purchased = skinId === 'DEFAULT';
+                }
+                saveSkinData();
+                saveCoins();
+                saveUpgradeExpire();
+                saveInventoryUpgrade();
+                saveSettings();
+                gameState = 'LOGIN_SCREEN';
+                localStorage.removeItem('flappy_rocket_current_user');
+            }
+        }
+
+        // --- Звуки и аудио ---
+        let storedMusicVol = localStorage.getItem('flappy_rocket_music_vol');
+        let bgMusicVolume = storedMusicVol !== null ? parseFloat(storedMusicVol) : 0.5;
+        if (isNaN(bgMusicVolume)) bgMusicVolume = 0.5;
+
+        let storedSfxVol = localStorage.getItem('flappy_rocket_sfx_vol');
+        let sfxVolume = storedSfxVol !== null ? parseFloat(storedSfxVol) : 0.5;
+        if (isNaN(sfxVolume)) sfxVolume = 0.5;
+
+        let bgMusic = null;
+        let clickSound = null;
+
+        function initAudio() {
+            try {
+                bgMusic = new Audio('Backround_Music.mp3');
+                bgMusic.loop = true;
+                bgMusic.volume = bgMusicVolume;
+            } catch(e) { bgMusic = null; }
+            
+            try {
+                clickSound = new Audio('Click.mp3');
+                clickSound.volume = sfxVolume;
+            } catch(e) { clickSound = null; }
+        }
+        initAudio();
+
+        function playClick() {
+            if (clickSound) {
+                clickSound.volume = sfxVolume;
+                clickSound.currentTime = 0;
+                clickSound.play().catch(() => {});
+            }
+        }
+
+        function initAudioOnFirstInteraction() {
+            if (bgMusic) {
+                bgMusic.play().catch(() => {});
+            }
+            window.removeEventListener('mousedown', initAudioOnFirstInteraction);
+            window.removeEventListener('touchstart', initAudioOnFirstInteraction);
+        }
+        window.addEventListener('mousedown', initAudioOnFirstInteraction);
+        window.addEventListener('touchstart', initAudioOnFirstInteraction);
+        if (bgMusic) {
+            bgMusic.play().catch(() => {});
+        }
+
+        // --- Сохранение и загрузка данных ---
+        let coins = parseInt(localStorage.getItem('flappy_rocket_coins')) || 0;
+        let fuelUpgradeExpireTime = parseInt(localStorage.getItem('flappy_rocket_fuel_expire')) || 0;
+        let inventoryUpgradeExpireTime = parseInt(localStorage.getItem('flappy_rocket_inv_expire')) || 0;
+        let inventoryUpgradePrice = parseInt(localStorage.getItem('flappy_rocket_inv_price')) || 5;
+        let bestScore = parseInt(localStorage.getItem('flappy_rocket_best_score')) || 0;
+
+        const SKINS = {
+            DEFAULT: { id: 'default', nameKey: 'default_skin', price: 0, imgIdle: 'Raketa-1.png', imgFly: 'Rakera-2.png', purchased: true },
+            CARTOON: { id: 'cartoon', nameKey: 'cartoon_skin', price: 5, imgIdle: 'Mult-Raketa-1.png', imgFly: 'Mult-Raketa-2.png', purchased: false },
+            RAINBOW: { id: 'rainbow', nameKey: 'rainbow_skin', price: 10, imgIdle: 'Rainbow-Roc-1.png', imgFly: 'Rainbow-Roc-2.png', purchased: false },
+            NYAN: { id: 'nyan', nameKey: 'nyan_skin', price: 15, imgIdle: 'Nyan-Rocket-1.png', imgFly: 'Nyan-Rocket-2.png', purchased: false }
+        };
+
+        let currentSkin = localStorage.getItem('flappy_rocket_skin') || 'default';
+        let skinImages = {};
+
+        let parsedSkins;
+        try {
+            parsedSkins = JSON.parse(localStorage.getItem('flappy_rocket_purchased_skins'));
+        } catch (e) {
+            parsedSkins = null;
+        }
+        
+        let purchasedSkins = Array.isArray(parsedSkins) ? parsedSkins : ['default'];
+        
+        if (!purchasedSkins.includes('default')) {
+            purchasedSkins.push('default');
+        }
+
+        purchasedSkins.forEach(skinId => {
+            const matchedKey = Object.keys(SKINS).find(k => SKINS[k].id === skinId || k.toLowerCase() === skinId.toLowerCase());
+            if (matchedKey) {
+                SKINS[matchedKey].purchased = true;
+            }
+        });
+
+        function saveSkinData() {
+            localStorage.setItem('flappy_rocket_skin', currentSkin);
+            localStorage.setItem('flappy_rocket_purchased_skins', JSON.stringify(purchasedSkins));
+            if (currentUser) saveUserProgress();
+        }
+
+        function saveCoins() { 
+            localStorage.setItem('flappy_rocket_coins', coins); 
+            if (currentUser) saveUserProgress();
+        }
+        function saveUpgradeExpire() { 
+            localStorage.setItem('flappy_rocket_fuel_expire', fuelUpgradeExpireTime);
+            if (currentUser) saveUserProgress();
+        }
+        function saveInventoryUpgrade() {
+            localStorage.setItem('flappy_rocket_inv_expire', inventoryUpgradeExpireTime);
+            localStorage.setItem('flappy_rocket_inv_price', inventoryUpgradePrice);
+            if (currentUser) saveUserProgress();
+        }
+        function saveSettings() {
+            localStorage.setItem('flappy_rocket_music_vol', bgMusicVolume);
+            localStorage.setItem('flappy_rocket_sfx_vol', sfxVolume);
+            if (bgMusic) bgMusic.volume = bgMusicVolume;
+            if (currentUser) saveUserProgress();
+        }
+        function saveBestScore() {
+            localStorage.setItem('flappy_rocket_best_score', bestScore);
+            if (currentUser) saveUserProgress();
+        }
+
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'KeyL' || e.key === 'l' || e.key === 'L' || e.key === 'д' || e.key === 'Д') {
+                coins += 100;
+                saveCoins();
+            }
+        });
+
+        function loadSkinImages() {
+            for (let skinId in SKINS) {
+                const skin = SKINS[skinId];
+                if (!skinImages[skin.id]) {
+                    skinImages[skin.id] = {
+                        idle: new Image(),
+                        fly: new Image()
+                    };
+                }
+                skinImages[skin.id].idle.src = skin.imgIdle;
+                skinImages[skin.id].fly.src = skin.imgFly;
+            }
+        }
+        loadSkinImages();
+
+        const imgFuel = new Image(); imgFuel.src = 'Toplivo.png';
+        const imgCoin = new Image(); imgCoin.src = 'Coin.png';
+        const imgExstraCoin = new Image(); imgExstraCoin.src = 'Exstra-Coin.png';
+
+        const imgIdle = new Image(); imgIdle.src = 'Raketa-1.png';
+        const imgFly = new Image(); imgFly.src = 'Rakera-2.png';
+
+        const rocket = {
+            x: 0, y: 0, width: 0, height: 0,
+            velocity: 0, gravity: 0.5, lift: -9, angle: 0
+        };
+
+        const menuRocket = { x: -600, y: 0, width: 0, height: 0, time: 0 };
+
+        let gameState = 'LOGIN_SCREEN';
+        let safeTop = 0;
+        let safeLeft = 0;
+
+        let pauseBtn = { x: 0, y: 0, size: 55 };
+        let pauseMenuButtons = [];
+        let shopButtons = [];
+        let menuButtons = [];
+        let skinsMenuButtons = [];
+        let skinsShopButtons = [];
+        let settingsMenuButtons = [];
+        let loginButtons = [];
+        let registerButtons = [];
+        let leaderboardButtons = [];
+
+        let pauseStartTime = 0;
+        let unpauseEndTime = 0;
+        let menuBlockEndTime = 0;
+        let touchLockEndTime = 0;
+
+        let fuel = 5;
+        let nextFuelTime = 0;
+        let hasBonusTime = false;
+        let canisters = [];
+        let nextCanisterTime = 0;
+
+        let gameCoinsList = [];
+        let nextCoinTime = 0;
+
+        let stars = [];
+        const STAR_COUNT = 100;
+
+        let score = 0;
+        let scoreTimer = 0;
+        const SCORE_INTERVAL = 5;
+
+        let loginInput = { username: '', password: '', error: '' };
+        let registerInput = { username: '', password: '', confirm: '', error: '' };
+        let showRegister = false;
+        let logoutConfirm = false;
+        let buttonsBlocked = false;
+        let buttonsBlockEndTime = 0;
+
+        function initStars() {
+            stars = [];
+            for (let i = 0; i < STAR_COUNT; i++) {
+                stars.push({
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * canvas.height,
+                    size: Math.random() * 2 + 0.5,
+                    speed: Math.random() * 2 + 0.5,
+                    alpha: Math.random() * 0.8 + 0.2
+                });
+            }
+        }
+
+        function updateMenuButtons() {
+            const btnWidth = Math.min(canvas.width * 0.40, 220);
+            const btnHeight = Math.max(42, Math.min(canvas.height * 0.07, 50));
+            const startY = canvas.height * 0.46;
+            const spacing = btnHeight * 0.3;
+
+            menuButtons = [
+                { id: 'PLAY', text: t('play'), x: canvas.width * 0.05, y: startY, w: btnWidth, h: btnHeight },
+                { id: 'SHOP', text: t('shop'), x: canvas.width - canvas.width * 0.05 - btnWidth, y: startY, w: btnWidth, h: btnHeight },
+                { id: 'SKINS', text: t('skins'), x: canvas.width * 0.05, y: startY + btnHeight + spacing, w: btnWidth, h: btnHeight },
+                { id: 'LEADERBOARD', text: t('leaderboard'), x: canvas.width - canvas.width * 0.05 - btnWidth, y: startY + btnHeight + spacing, w: btnWidth, h: btnHeight },
+                { id: 'SETTINGS', text: t('settings'), x: canvas.width / 2 - btnWidth / 2, y: startY + btnHeight * 2 + spacing * 2, w: btnWidth, h: btnHeight }
+            ];
+
+            pauseMenuButtons = [
+                { id: 'RESUME', text: t('resume'), x: canvas.width / 2 - btnWidth / 2, y: startY, w: btnWidth, h: btnHeight },
+                { id: 'TO_MENU', text: t('to_menu'), x: canvas.width / 2 - btnWidth / 2, y: startY + btnHeight + spacing, w: btnWidth, h: btnHeight }
+            ];
+
+            const bottomMargin = 20;
+            const backY = canvas.height - btnHeight - bottomMargin;
+            const nextY = backY - btnHeight - 14;
+
+            shopButtons = [
+                { id: 'BUY_TANK', text: t('buy_tank'), x: canvas.width / 2 - btnWidth / 2, y: canvas.height * 0.38, w: btnWidth, h: btnHeight },
+                { id: 'BUY_INV', text: t('buy_inv', inventoryUpgradePrice), x: canvas.width / 2 - btnWidth / 2, y: canvas.height * 0.38 + btnHeight + spacing, w: btnWidth, h: btnHeight },
+                { id: 'NEXT', text: t('next'), x: canvas.width / 2 - btnWidth / 2, y: nextY, w: btnWidth, h: btnHeight },
+                { id: 'BACK', text: t('back'), x: canvas.width / 2 - btnWidth / 2, y: backY, w: btnWidth, h: btnHeight }
+            ];
+
+            skinsMenuButtons = [
+                { id: 'BACK', text: t('back'), x: canvas.width * 0.05, y: canvas.height * 0.85, w: btnWidth, h: btnHeight }
+            ];
+
+            const langNames = {
+                ru: 'Русский',
+                en: 'English',
+                be: 'Беларуская',
+                es: 'Español'
+            };
+
+            settingsMenuButtons = [
+                { id: 'LANG', text: t('language', langNames[currentLanguage]), x: canvas.width / 2 - btnWidth / 2, y: canvas.height * 0.68, w: btnWidth, h: btnHeight },
+                { id: 'LOGOUT', text: t('logout'), x: canvas.width / 2 - btnWidth / 2, y: canvas.height * 0.68 + btnHeight + spacing, w: btnWidth, h: btnHeight },
+                { id: 'BACK', text: t('back'), x: canvas.width / 2 - btnWidth / 2, y: canvas.height * 0.68 + btnHeight * 2 + spacing * 2, w: btnWidth, h: btnHeight }
+            ];
+
+            leaderboardButtons = [
+                { id: 'BACK', text: t('back'), x: canvas.width * 0.05, y: canvas.height * 0.88, w: btnWidth, h: btnHeight },
+                { id: 'REFRESH', text: t('leaderboard_refresh'), x: canvas.width - canvas.width * 0.05 - btnWidth, y: canvas.height * 0.88, w: btnWidth, h: btnHeight }
+            ];
+
+            const btnSize = Math.max(52, Math.min(canvas.width * 0.14, 65));
+            pauseBtn = {
+                x: canvas.width - safeLeft - btnSize - 15,
+                y: safeTop + 15,
+                size: btnSize
+            };
+        }
+
+        function updateLoginButtons() {
+            const btnWidth = Math.min(canvas.width * 0.75, 280);
+            const btnHeight = Math.max(44, Math.min(canvas.height * 0.07, 52));
+            const spacing = btnHeight * 0.8;
+            const startY = canvas.height * 0.55;
+
+            loginButtons = [
+                { id: 'LOGIN', text: t('login_btn'), x: canvas.width / 2 - btnWidth / 2, y: startY, w: btnWidth, h: btnHeight },
+                { id: 'TO_REGISTER', text: t('to_register'), x: canvas.width / 2 - btnWidth / 2, y: startY + btnHeight + spacing, w: btnWidth, h: btnHeight }
+            ];
+
+            registerButtons = [
+                { id: 'REGISTER', text: t('register_btn'), x: canvas.width / 2 - btnWidth / 2, y: startY, w: btnWidth, h: btnHeight },
+                { id: 'TO_LOGIN', text: t('to_login'), x: canvas.width / 2 - btnWidth / 2, y: startY + btnHeight + spacing, w: btnWidth, h: btnHeight }
+            ];
+        }
+
+        function updateSkinsShopButtons() {
+            const btnWidth = Math.min(canvas.width * 0.75, 280);
+            const btnHeight = Math.max(44, Math.min(canvas.height * 0.075, 54));
+            const bottomMargin = 20;
+            
+            skinsShopButtons = [
+                {
+                    id: 'BACK',
+                    text: t('back'),
+                    x: canvas.width / 2 - btnWidth / 2,
+                    y: canvas.height - btnHeight - bottomMargin,
+                    w: btnWidth,
+                    h: btnHeight
+                }
+            ];
+        }
+
+        function resize() {
+            const aspectRatio = 9 / 16;
+            let width = window.innerWidth;
+            let height = window.innerHeight;
+
+            if (width / height > aspectRatio) {
+                canvas.height = height;
+                canvas.width = height * aspectRatio;
+            } else {
+                canvas.width = width;
+                canvas.height = width / aspectRatio;
+            }
+
+            canvas.style.position = 'absolute';
+            canvas.style.left = (window.innerWidth - canvas.width) / 2 + 'px';
+            canvas.style.top = (window.innerHeight - canvas.height) / 2 + 'px';
+
+            safeTop = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--safe-top')) || 10;
+            safeLeft = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--safe-left')) || 10;
+
+            const baseSize = Math.min(canvas.width * 0.65, canvas.height * 0.42);
+            rocket.width = Math.max(170, Math.min(baseSize, 340));
+            rocket.height = rocket.width * 0.66;
+
+            menuRocket.width = rocket.width * 2.3;
+            menuRocket.height = menuRocket.width * 0.66;
+
+            if (gameState === 'WAITING_TO_START' || gameState === 'MAIN_MENU') {
+                rocket.x = canvas.width * 0.08;
+                rocket.y = canvas.height / 2 - rocket.height / 2;
+            }
+
+            updateMenuButtons();
+            updateLoginButtons();
+            updateSkinsShopButtons();
+            initStars();
+        }
+
+        window.addEventListener('resize', resize);
+        window.addEventListener('orientationchange', () => setTimeout(resize, 100));
+
+        function getCurrentSkinImages() {
+            const matchedKey = Object.keys(SKINS).find(k => SKINS[k].id === currentSkin || k.toLowerCase() === currentSkin.toLowerCase());
+            const skin = matchedKey ? SKINS[matchedKey] : SKINS.DEFAULT;
+            if (skin && skinImages[skin.id]) {
+                return skinImages[skin.id];
+            }
+            return { idle: imgIdle, fly: imgFly };
+        }
+
+        function getSkinName(skinId) {
+            const matchedKey = Object.keys(SKINS).find(k => SKINS[k].id === skinId || k.toLowerCase() === skinId.toLowerCase());
+            if (matchedKey) {
+                return t(SKINS[matchedKey].nameKey);
+            }
+            return t('default_skin');
+        }
+
+        function checkAllSkinsBought() {
+            let allBought = true;
+            for (let skinId in SKINS) {
+                if (!SKINS[skinId].purchased) {
+                    allBought = false;
+                    break;
+                }
+            }
+            return allBought;
+        }
+
+        function handlePressStart(e) {
+            if (Date.now() < touchLockEndTime) return;
+            
+            if (gameState === 'LOGIN_SCREEN' && Date.now() < buttonsBlockEndTime) return;
+
+            let clientX, clientY;
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+
+            const rect = canvas.getBoundingClientRect();
+            const canvasX = clientX - rect.left;
+            const canvasY = clientY - rect.top;
+
+            if (canvasX < 0 || canvasX > canvas.width || canvasY < 0 || canvasY > canvas.height) return;
+
+            if (gameState === 'LOGIN_SCREEN') {
+                // Проверяем кнопки
+                for (let btn of (showRegister ? registerButtons : loginButtons)) {
+                    if (canvasX >= btn.x && canvasX <= btn.x + btn.w && canvasY >= btn.y && canvasY <= btn.y + btn.h) {
+                        playClick();
+                        buttonsBlocked = true;
+                        buttonsBlockEndTime = Date.now() + 1000;
+                        
+                        if (btn.id === 'LOGIN') {
+                            handleLoginDirect();
+                        } else if (btn.id === 'TO_REGISTER') {
+                            showRegister = true;
+                            registerInput.error = '';
+                            loginInput.error = '';
+                            buttonsBlocked = false;
+                        } else if (btn.id === 'REGISTER') {
+                            handleRegisterDirect();
+                        } else if (btn.id === 'TO_LOGIN') {
+                            showRegister = false;
+                            loginInput.error = '';
+                            registerInput.error = '';
+                            buttonsBlocked = false;
+                        }
+                        break;
+                    }
+                }
+            }
+            else if (gameState === 'MAIN_MENU') {
+                if (Date.now() < menuBlockEndTime) return;
+
+                for (let btn of menuButtons) {
+                    if (canvasX >= btn.x && canvasX <= btn.x + btn.w && canvasY >= btn.y && canvasY <= btn.y + btn.h) {
+                        playClick();
+                        if (btn.id === 'PLAY') prepareGameWaiting();
+                        else if (btn.id === 'SHOP') {
+                            gameState = 'SHOP';
+                            touchLockEndTime = Date.now() + 300;
+                        } else if (btn.id === 'SKINS') {
+                            gameState = 'SKINS';
+                            touchLockEndTime = Date.now() + 300;
+                            updateSkinsShopButtons();
+                        } else if (btn.id === 'SETTINGS') {
+                            gameState = 'SETTINGS';
+                            touchLockEndTime = Date.now() + 300;
+                        } else if (btn.id === 'LEADERBOARD') {
+                            gameState = 'LEADERBOARD';
+                            touchLockEndTime = Date.now() + 300;
+                            loadLeaderboard();
+                        }
+                        break;
+                    }
+                }
+            }
+            else if (gameState === 'SETTINGS') {
+                const sliderWidth = Math.min(canvas.width * 0.7, 280);
+                const sliderHeight = 24;
+                const sliderX = canvas.width / 2 - sliderWidth / 2;
+                
+                const musicSliderY = canvas.height * 0.42;
+                if (canvasX >= sliderX && canvasX <= sliderX + sliderWidth && canvasY >= musicSliderY - 10 && canvasY <= musicSliderY + sliderHeight + 10) {
+                    bgMusicVolume = Math.max(0, Math.min(1, (canvasX - sliderX) / sliderWidth));
+                    saveSettings();
+                    playClick();
+                    return;
+                }
+
+                const sfxSliderY = canvas.height * 0.56;
+                if (canvasX >= sliderX && canvasX <= sliderX + sliderWidth && canvasY >= sfxSliderY - 10 && canvasY <= sfxSliderY + sliderHeight + 10) {
+                    sfxVolume = Math.max(0, Math.min(1, (canvasX - sliderX) / sliderWidth));
+                    saveSettings();
+                    playClick();
+                    return;
+                }
+
+                for (let btn of settingsMenuButtons) {
+                    if (canvasX >= btn.x && canvasX <= btn.x + btn.w && canvasY >= btn.y && canvasY <= btn.y + btn.h) {
+                        playClick();
+                        if (btn.id === 'BACK') {
+                            gameState = 'MAIN_MENU';
+                            touchLockEndTime = Date.now() + 300;
+                        } else if (btn.id === 'LOGOUT') {
+                            if (!logoutConfirm) {
+                                logoutConfirm = true;
+                            } else {
+                                logoutAccount();
+                                logoutConfirm = false;
+                                touchLockEndTime = Date.now() + 300;
+                            }
+                        } else if (btn.id === 'LANG') {
+                            switchLanguage();
+                            touchLockEndTime = Date.now() + 300;
+                        }
+                        break;
+                    }
+                }
+            }
+            else if (gameState === 'LEADERBOARD') {
+                for (let btn of leaderboardButtons) {
+                    if (canvasX >= btn.x && canvasX <= btn.x + btn.w && canvasY >= btn.y && canvasY <= btn.y + btn.h) {
+                        playClick();
+                        if (btn.id === 'BACK') {
+                            gameState = 'MAIN_MENU';
+                            touchLockEndTime = Date.now() + 300;
+                        } else if (btn.id === 'REFRESH') {
+                            loadLeaderboard();
+                            touchLockEndTime = Date.now() + 300;
+                        }
+                        break;
+                    }
+                }
+            }
+            else if (gameState === 'SHOP') {
+                for (let btn of shopButtons) {
+                    if (canvasX >= btn.x && canvasX <= btn.x + btn.w && canvasY >= btn.y && canvasY <= btn.y + btn.h) {
+                        playClick();
+                        const now = Date.now();
+                        if (btn.id === 'BUY_TANK') {
+                            if (now > fuelUpgradeExpireTime && coins >= 10) {
+                                coins -= 10;
+                                saveCoins();
+                                fuelUpgradeExpireTime = now + 10 * 60 * 1000;
+                                saveUpgradeExpire();
+                                updateMenuButtons();
+                            }
+                        } else if (btn.id === 'BUY_INV') {
+                            if (now > inventoryUpgradeExpireTime && coins >= inventoryUpgradePrice) {
+                                coins -= inventoryUpgradePrice;
+                                saveCoins();
+                                inventoryUpgradeExpireTime = now + 10 * 60 * 1000;
+                                inventoryUpgradePrice += 3;
+                                saveInventoryUpgrade();
+                                updateMenuButtons();
+                            }
+                        } else if (btn.id === 'NEXT') {
+                            gameState = 'SKINS_SHOP';
+                            touchLockEndTime = Date.now() + 300;
+                            updateSkinsShopButtons();
+                        } else if (btn.id === 'BACK') {
+                            gameState = 'MAIN_MENU';
+                            touchLockEndTime = Date.now() + 300;
+                        }
+                        break;
+                    }
+                }
+            }
+            else if (gameState === 'SKINS') {
+                for (let btn of skinsMenuButtons) {
+                    if (canvasX >= btn.x && canvasX <= btn.x + btn.w && canvasY >= btn.y && canvasY <= btn.y + btn.h) {
+                        playClick();
+                        if (btn.id === 'BACK') {
+                            gameState = 'MAIN_MENU';
+                            touchLockEndTime = Date.now() + 300;
+                        }
+                        break;
+                    }
+                }
+                
+                const skinY = canvas.height * 0.42;
+                const btnWidth = Math.min(canvas.width * 0.75, 280);
+                const btnHeight = Math.max(44, Math.min(canvas.height * 0.075, 54));
+                const spacing = btnHeight * 0.3;
+                
+                let yPos = skinY;
+                for (let skinId in SKINS) {
+                    const skin = SKINS[skinId];
+                    if (skin.purchased) {
+                        const btnX = canvas.width / 2 - btnWidth / 2;
+                        if (canvasX >= btnX && canvasX <= btnX + btnWidth &&
+                            canvasY >= yPos && canvasY <= yPos + btnHeight) {
+                            playClick();
+                            currentSkin = skin.id;
+                            saveSkinData();
+                            updateMenuButtons();
+                            break;
+                        }
+                        yPos += btnHeight + spacing;
+                    }
+                }
+            }
+            else if (gameState === 'SKINS_SHOP') {
+                for (let btn of skinsShopButtons) {
+                    if (canvasX >= btn.x && canvasX <= btn.x + btn.w && canvasY >= btn.y && canvasY <= btn.y + btn.h) {
+                        playClick();
+                        if (btn.id === 'BACK') {
+                            gameState = 'SHOP';
+                            touchLockEndTime = Date.now() + 300;
+                            break;
+                        }
+                        break;
+                    }
+                }
+
+                const skinShopStartY = canvas.height * 0.38;
+                const btnWidth = Math.min(canvas.width * 0.75, 280);
+                const btnHeight = Math.max(44, Math.min(canvas.height * 0.075, 54));
+                const spacing = btnHeight * 0.3;
+                
+                let skinIndex = 0;
+                for (let skinId in SKINS) {
+                    const skin = SKINS[skinId];
+                    if (skinId === 'DEFAULT') continue;
+
+                    if (!skin.purchased) {
+                        const yPos = skinShopStartY + skinIndex * (btnHeight + spacing);
+                        const btnX = canvas.width / 2 - btnWidth / 2;
+                        if (canvasX >= btnX && canvasX <= btnX + btnWidth &&
+                            canvasY >= yPos && canvasY <= yPos + btnHeight) {
+                            if (coins >= skin.price) {
+                                playClick();
+                                coins -= skin.price;
+                                saveCoins();
+                                skin.purchased = true;
+                                if (!purchasedSkins.includes(skin.id)) {
+                                    purchasedSkins.push(skin.id);
+                                }
+                                currentSkin = skin.id;
+                                saveSkinData();
+                                updateSkinsShopButtons();
+                                updateMenuButtons();
+                            }
+                            break;
+                        }
+                        skinIndex++;
+                    }
+                }
+            }
+            else if (gameState === 'PLAYING') {
+                if (canvasX >= pauseBtn.x && canvasX <= pauseBtn.x + pauseBtn.size &&
+                    canvasY >= pauseBtn.y && canvasY <= pauseBtn.y + pauseBtn.size) {
+                    playClick();
+                    gameState = 'PAUSED';
+                    pauseStartTime = Date.now();
+                    return;
+                }
+                rocket.velocity = rocket.lift;
+            }
+            else if (gameState === 'PAUSED') {
+                for (let btn of pauseMenuButtons) {
+                    if (canvasX >= btn.x && canvasX <= btn.x + btn.w && canvasY >= btn.y && canvasY <= btn.y + btn.h) {
+                        playClick();
+                        if (btn.id === 'RESUME') {
+                            gameState = 'UNPAUSING';
+                            unpauseEndTime = Date.now() + 2000;
+                            rocket.velocity = 0;
+                        } else if (btn.id === 'TO_MENU') {
+                            gameState = 'MAIN_MENU';
+                            menuBlockEndTime = Date.now() + 1000;
+                            score = 0;
+                        }
+                        break;
+                    }
+                }
+            }
+            else if (gameState === 'WAITING_TO_START') startPlaying();
+            else if (gameState === 'GAMEOVER') {
+                prepareGameWaiting();
+                score = 0;
+            }
+        }
+
+        function handleLoginDirect() {
+            const username = prompt('ВХОД В АККАУНТ\nВведите имя пользователя:');
+            if (username === null) {
+                buttonsBlocked = false;
+                return;
+            }
+            if (!username.trim()) {
+                loginInput.error = 'Имя не может быть пустым!';
+                buttonsBlocked = false;
+                return;
+            }
+            
+            const password = prompt('ВХОД В АККАУНТ\nВведите пароль для "' + username.trim() + '":');
+            if (password === null) {
+                buttonsBlocked = false;
+                return;
+            }
+            if (!password.trim()) {
+                loginInput.error = 'Пароль не может быть пустым!';
+                buttonsBlocked = false;
+                return;
+            }
+
+            const userData = loginAccount(username.trim(), password.trim());
+            if (userData) {
+                currentUser = username.trim();
+                loadUserProgress(username.trim());
+                gameState = 'MAIN_MENU';
+                loginInput.error = '';
+                logoutConfirm = false;
+                localStorage.setItem('flappy_rocket_current_user', username.trim());
+                updateMenuButtons();
+                if (bgMusic) bgMusic.volume = bgMusicVolume;
+                buttonsBlocked = false;
+            } else {
+                loginInput.error = t('login_error');
+                buttonsBlocked = false;
+            }
+        }
+
+        function handleRegisterDirect() {
+            const username = prompt('РЕГИСТРАЦИЯ\nПридумайте имя пользователя (минимум 2 символа):');
+            if (username === null) {
+                buttonsBlocked = false;
+                return;
+            }
+            if (!username.trim()) {
+                registerInput.error = 'Имя не может быть пустым!';
+                buttonsBlocked = false;
+                return;
+            }
+            if (username.trim().length < 2) {
+                registerInput.error = t('register_error_name_length');
+                buttonsBlocked = false;
+                return;
+            }
+            
+            if (accounts[username.trim()]) {
+                registerInput.error = t('register_error_username');
+                buttonsBlocked = false;
+                return;
+            }
+
+            const password = prompt('РЕГИСТРАЦИЯ\nПридумайте пароль для "' + username.trim() + '"\n(Минимум 6 символов, допустимы: латиница, цифры, *()?%№#)');
+            if (password === null) {
+                buttonsBlocked = false;
+                return;
+            }
+            if (!password.trim()) {
+                registerInput.error = 'Пароль не может быть пустым!';
+                buttonsBlocked = false;
+                return;
+            }
+            if (password.trim().length < 6) {
+                registerInput.error = t('register_error_length');
+                buttonsBlocked = false;
+                return;
+            }
+
+            const validChars = /^[a-zA-Z0-9*()?%№#]+$/;
+            if (!validChars.test(password.trim())) {
+                registerInput.error = t('register_error_chars');
+                buttonsBlocked = false;
+                return;
+            }
+
+            const confirm = prompt('РЕГИСТРАЦИЯ\nПодтвердите пароль для "' + username.trim() + '":');
+            if (confirm === null) {
+                buttonsBlocked = false;
+                return;
+            }
+            
+            if (password.trim() !== confirm.trim()) {
+                registerInput.error = t('register_error_match');
+                buttonsBlocked = false;
+                return;
+            }
+
+            if (createAccount(username.trim(), password.trim())) {
+                currentUser = username.trim();
+                loadUserProgress(username.trim());
+                gameState = 'MAIN_MENU';
+                registerInput.error = '';
+                logoutConfirm = false;
+                localStorage.setItem('flappy_rocket_current_user', username.trim());
+                updateMenuButtons();
+                if (bgMusic) bgMusic.volume = bgMusicVolume;
+                buttonsBlocked = false;
+            } else {
+                registerInput.error = t('register_error_general');
+                buttonsBlocked = false;
+            }
+        }
+
+        window.addEventListener('mousedown', handlePressStart);
+        window.addEventListener('touchstart', handlePressStart, { passive: false });
+
+        let isDraggingSlider = false;
+        let dragSliderType = '';
+
+        function handleSliderDrag(e) {
+            if (!isDraggingSlider) return;
+            e.preventDefault();
+
+            let clientX;
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+            } else {
+                clientX = e.clientX;
+            }
+
+            const rect = canvas.getBoundingClientRect();
+            const canvasX = clientX - rect.left;
+            const sliderWidth = Math.min(canvas.width * 0.7, 280);
+            const sliderX = canvas.width / 2 - sliderWidth / 2;
+
+            if (canvasX >= sliderX && canvasX <= sliderX + sliderWidth) {
+                if (dragSliderType === 'music') {
+                    bgMusicVolume = Math.max(0, Math.min(1, (canvasX - sliderX) / sliderWidth));
+                    saveSettings();
+                } else if (dragSliderType === 'sfx') {
+                    sfxVolume = Math.max(0, Math.min(1, (canvasX - sliderX) / sliderWidth));
+                    saveSettings();
+                }
+            }
+        }
+
+        function startSliderDrag(e) {
+            let clientX, clientY;
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+
+            const rect = canvas.getBoundingClientRect();
+            const canvasX = clientX - rect.left;
+            const canvasY = clientY - rect.top;
+
+            if (gameState !== 'SETTINGS') return;
+
+            const sliderWidth = Math.min(canvas.width * 0.7, 280);
+            const sliderHeight = 24;
+            const sliderX = canvas.width / 2 - sliderWidth / 2;
+            
+            const musicSliderY = canvas.height * 0.42;
+            if (canvasX >= sliderX && canvasX <= sliderX + sliderWidth && canvasY >= musicSliderY - 10 && canvasY <= musicSliderY + sliderHeight + 10) {
+                isDraggingSlider = true;
+                dragSliderType = 'music';
+                bgMusicVolume = Math.max(0, Math.min(1, (canvasX - sliderX) / sliderWidth));
+                saveSettings();
+                return;
+            }
+
+            const sfxSliderY = canvas.height * 0.56;
+            if (canvasX >= sliderX && canvasX <= sliderX + sliderWidth && canvasY >= sfxSliderY - 10 && canvasY <= sfxSliderY + sliderHeight + 10) {
+                isDraggingSlider = true;
+                dragSliderType = 'sfx';
+                sfxVolume = Math.max(0, Math.min(1, (canvasX - sliderX) / sliderWidth));
+                saveSettings();
+                return;
+            }
+        }
+
+        function endSliderDrag(e) {
+            isDraggingSlider = false;
+            dragSliderType = '';
+        }
+
+        window.addEventListener('mousedown', startSliderDrag);
+        window.addEventListener('touchstart', startSliderDrag, { passive: false });
+        window.addEventListener('mousemove', handleSliderDrag);
+        window.addEventListener('touchmove', handleSliderDrag, { passive: false });
+        window.addEventListener('mouseup', endSliderDrag);
+        window.addEventListener('touchend', endSliderDrag);
+
+        function prepareGameWaiting() {
+            rocket.x = canvas.width * 0.08;
+            rocket.y = canvas.height / 2 - rocket.height / 2;
+            rocket.velocity = 0;
+            rocket.angle = 0;
+            score = 0;
+            scoreTimer = 0;
+
+            const isUpgradeActive = Date.now() < fuelUpgradeExpireTime;
+            fuel = isUpgradeActive ? 10 : 5;
+
+            hasBonusTime = false;
+            canisters = [];
+            gameCoinsList = [];
+            gameState = 'WAITING_TO_START';
+        }
+
+        function startPlaying() {
+            nextFuelTime = Date.now() + 3000;
+            nextCanisterTime = Date.now() + Math.random() * 4000 + 4000;
+            nextCoinTime = Date.now() + Math.random() * 7000 + 8000;
+            rocket.velocity = rocket.lift;
+            gameState = 'PLAYING';
+            scoreTimer = Date.now();
+        }
+
+        function update() {
+            if (gameState !== 'WAITING_TO_START' && gameState !== 'PAUSED' && gameState !== 'UNPAUSING' && gameState !== 'LOGIN_SCREEN' && gameState !== 'LEADERBOARD') {
+                for (let star of stars) {
+                    star.x -= star.speed * 1.5;
+                    if (star.x < 0) {
+                        star.x = canvas.width + Math.random() * 20;
+                        star.y = Math.random() * canvas.height;
+                    }
+                }
+            }
+
+            if (gameState === 'MAIN_MENU' || gameState === 'SHOP' || gameState === 'SKINS' || gameState === 'SKINS_SHOP' || gameState === 'SETTINGS' || gameState === 'LEADERBOARD') {
+                menuRocket.time += 0.05;
+                menuRocket.x += 6.5;
+                menuRocket.y = (canvas.height * 0.22) + Math.sin(menuRocket.time) * 25;
+
+                if (menuRocket.x > canvas.width + menuRocket.width + 50) {
+                    menuRocket.x = -menuRocket.width - 100;
+                }
+            }
+
+            if (gameState === 'UNPAUSING') {
+                const now = Date.now();
+                if (now >= unpauseEndTime) {
+                    const totalPauseTime = now - pauseStartTime;
+                    nextFuelTime += totalPauseTime;
+                    nextCanisterTime += totalPauseTime;
+                    nextCoinTime += totalPauseTime;
+                    scoreTimer += totalPauseTime;
+                    gameState = 'PLAYING';
+                }
+            }
+
+            if (gameState === 'PLAYING') {
+                const now = Date.now();
+
+                if (now - scoreTimer >= SCORE_INTERVAL) {
+                    score++;
+                    scoreTimer = now;
+                }
+
+                if (now >= nextFuelTime) {
+                    fuel--;
+                    hasBonusTime = false;
+                    nextFuelTime = now + 3000;
+                    if (fuel <= 0) { 
+                        fuel = 0; 
+                        gameState = 'GAMEOVER';
+                        if (score > bestScore) {
+                            bestScore = score;
+                            saveBestScore();
+                            if (currentUser) {
+                                updateLeaderboard(currentUser, bestScore, coins);
+                            }
+                        }
+                    }
+                }
+
+                if (now >= nextCanisterTime) {
+                    const canisterSize = Math.max(36, rocket.height * 0.32);
+                    canisters.push({
+                        x: canvas.width + 50,
+                        y: Math.random() * (canvas.height - canisterSize - 140) + 70,
+                        size: canisterSize,
+                        angle: Math.random() * Math.PI * 2,
+                        rotationSpeed: (Math.random() * 0.03 + 0.01) * (Math.random() < 0.5 ? 1 : -1)
+                    });
+                    nextCanisterTime = now + Math.random() * 4000 + 4000;
+                }
+
+                if (now >= nextCoinTime) {
+                    const coinSize = Math.max(36, rocket.height * 0.32);
+                    const isExtra = Math.random() < 0.2;
+                    gameCoinsList.push({
+                        x: canvas.width + 50,
+                        y: Math.random() * (canvas.height - coinSize - 140) + 70,
+                        size: coinSize,
+                        angle: Math.random() * Math.PI * 2,
+                        rotationSpeed: (Math.random() * 0.03 + 0.01) * (Math.random() < 0.5 ? 1 : -1),
+                        isExtra: isExtra,
+                        value: isExtra ? 5 : 1
+                    });
+                    nextCoinTime = now + Math.random() * 7000 + 8000;
+                }
+
+                for (let i = canisters.length - 1; i >= 0; i--) {
+                    let c = canisters[i];
+                    c.x -= 4.5;
+                    c.angle += c.rotationSpeed;
+
+                    if (rocket.x < c.x + c.size && rocket.x + rocket.width > c.x &&
+                        rocket.y < c.y + c.size && rocket.y + rocket.height > c.y) {
+                        fuel += 2;
+                        if (!hasBonusTime) { nextFuelTime += 4000; hasBonusTime = true; }
+                        canisters.splice(i, 1);
+                        continue;
+                    }
+                    if (c.x < -c.size - 50) canisters.splice(i, 1);
+                }
+
+                for (let i = gameCoinsList.length - 1; i >= 0; i--) {
+                    let coinObj = gameCoinsList[i];
+                    coinObj.x -= 4.5;
+                    coinObj.angle += coinObj.rotationSpeed;
+
+                    if (rocket.x < coinObj.x + coinObj.size && rocket.x + rocket.width > coinObj.x &&
+                        rocket.y < coinObj.y + coinObj.size && rocket.y + rocket.height > coinObj.y) {
+                        const isInvUpgradeActive = Date.now() < inventoryUpgradeExpireTime;
+                        const multiplier = isInvUpgradeActive ? 2 : 1;
+                        coins += coinObj.value * multiplier;
+                        saveCoins();
+                        gameCoinsList.splice(i, 1);
+                        continue;
+                    }
+                    if (coinObj.x < -coinObj.size - 50) gameCoinsList.splice(i, 1);
+                }
+
+                rocket.velocity += rocket.gravity;
+                rocket.y += rocket.velocity;
+
+                const targetAngle = (rocket.velocity < 0) ? -0.35 : 0.25;
+                rocket.angle += (targetAngle - rocket.angle) * 0.15;
+
+                const ceilingLimit = -rocket.height * 0.3;
+                if (rocket.y < ceilingLimit) { rocket.y = ceilingLimit; rocket.velocity = 0; }
+                if (rocket.y >= canvas.height) {
+                    gameState = 'GAMEOVER';
+                    if (score > bestScore) {
+                        bestScore = score;
+                        saveBestScore();
+                        if (currentUser) {
+                            updateLeaderboard(currentUser, bestScore, coins);
+                        }
+                    }
+                }
+            }
+        }
+
+        function drawRotatedImage(img, x, y, width, height, angle) {
+            ctx.save();
+            ctx.translate(x + width / 2, y + height / 2);
+            ctx.rotate(angle);
+            ctx.drawImage(img, -width / 2, -height / 2, width, height);
+            ctx.restore();
+        }
+
+        function drawUI() {
+            const fontSize = Math.max(22, Math.min(canvas.width * 0.065, 34));
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${fontSize}px Arial`;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+
+            const startX = Math.max(16, safeLeft + 12);
+            const startY = Math.max(16, safeTop + 12);
+
+            ctx.fillText(t('fuel', fuel), startX, startY);
+            ctx.fillText(t('coins', coins), startX, startY + fontSize * 1.35);
+
+            const scoreY = startY + fontSize * 2.7;
+            ctx.fillStyle = '#FFD700';
+            ctx.font = `bold ${fontSize * 0.9}px Arial`;
+            ctx.fillText(t('score', score), startX, scoreY);
+            
+            const bestY = scoreY + fontSize * 0.9;
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            ctx.font = `${fontSize * 0.7}px Arial`;
+            ctx.fillText(t('best', bestScore), startX, bestY);
+
+            if (currentUser) {
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.font = `${Math.max(10, fontSize * 0.4)}px Arial`;
+                ctx.fillText(currentUser, startX, bestY + fontSize * 0.7);
+            }
+
+            if (gameState === 'PLAYING') {
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.22)';
+                ctx.beginPath();
+                ctx.roundRect(pauseBtn.x, pauseBtn.y, pauseBtn.size, pauseBtn.size, 14);
+                ctx.fill();
+
+                ctx.strokeStyle = '#FFFFFF';
+                ctx.lineWidth = 2.5;
+                ctx.stroke();
+
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = `${pauseBtn.size * 0.52}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('||', pauseBtn.x + pauseBtn.size / 2, pauseBtn.y + pauseBtn.size / 2 + 1);
+            }
+        }
+
+        function drawLoginScreen() {
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#0a0a1a');
+            gradient.addColorStop(0.5, '#0d0d2b');
+            gradient.addColorStop(1, '#050510');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            for (let star of stars) {
+                ctx.fillStyle = `rgba(255, 255, 255, ${star.alpha})`;
+                ctx.beginPath();
+                ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            const fontSizeTitle = Math.max(28, Math.min(canvas.width * 0.085, 44));
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${fontSizeTitle}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            
+            if (showRegister) {
+                ctx.fillText(t('register_title'), canvas.width / 2, canvas.height * 0.12);
+                ctx.font = `${Math.max(13, Math.min(canvas.width * 0.035, 18))}px Arial`;
+                ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                ctx.fillText(t('register_sub'), canvas.width / 2, canvas.height * 0.19);
+                if (registerInput.error) {
+                    ctx.fillStyle = '#ff6b6b';
+                    ctx.font = `bold ${Math.max(13, Math.min(canvas.width * 0.035, 18))}px Arial`;
+                    ctx.fillText(registerInput.error, canvas.width / 2, canvas.height * 0.26);
+                }
+                drawButtons(registerButtons);
+            } else {
+                ctx.fillText(t('login_title'), canvas.width / 2, canvas.height * 0.12);
+                ctx.font = `${Math.max(13, Math.min(canvas.width * 0.035, 18))}px Arial`;
+                ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                ctx.fillText(t('login_sub'), canvas.width / 2, canvas.height * 0.19);
+                if (loginInput.error) {
+                    ctx.fillStyle = '#ff6b6b';
+                    ctx.font = `bold ${Math.max(13, Math.min(canvas.width * 0.035, 18))}px Arial`;
+                    ctx.fillText(loginInput.error, canvas.width / 2, canvas.height * 0.26);
+                }
+                drawButtons(loginButtons);
+            }
+        }
+
+        function drawMainMenu() {
+            const fontSizeTitle = Math.max(24, Math.min(canvas.width * 0.075, 38));
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${Math.max(22, fontSizeTitle * 0.7)}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(t('coins', coins), canvas.width / 2, Math.max(20, safeTop + 10));
+
+            ctx.font = `bold ${fontSizeTitle}px Arial`;
+            ctx.textBaseline = 'middle';
+            ctx.fillText(t('title'), canvas.width / 2, canvas.height * 0.34);
+
+            const activeSkinName = getSkinName(currentSkin);
+            ctx.font = `${Math.max(14, fontSizeTitle * 0.4)}px Arial`;
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            ctx.fillText(t('skin', activeSkinName), canvas.width / 2, canvas.height * 0.40);
+            
+            ctx.font = `${Math.max(12, fontSizeTitle * 0.35)}px Arial`;
+            ctx.fillStyle = 'rgba(255,215,0,0.6)';
+            ctx.fillText(t('best', bestScore), canvas.width / 2, canvas.height * 0.44);
+
+            if (currentUser) {
+                ctx.fillStyle = 'rgba(255,255,255,0.2)';
+                ctx.font = `${Math.max(10, fontSizeTitle * 0.3)}px Arial`;
+                ctx.fillText(`@${currentUser}`, canvas.width / 2, canvas.height * 0.48);
+            }
+
+            const isBlocked = Date.now() < menuBlockEndTime;
+            for (let btn of menuButtons) {
+                drawSingleButton(btn, btn.text, isBlocked);
+            }
+        }
+
+        function drawSettings() {
+            const fontSizeTitle = Math.max(22, Math.min(canvas.width * 0.065, 34));
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${Math.max(22, fontSizeTitle * 0.7)}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(t('coins', coins), canvas.width / 2, Math.max(20, safeTop + 10));
+
+            ctx.font = `bold ${fontSizeTitle}px Arial`;
+            ctx.textBaseline = 'middle';
+            ctx.fillText(t('settings_title'), canvas.width / 2, canvas.height * 0.28);
+
+            if (currentUser) {
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.font = `${Math.max(12, fontSizeTitle * 0.35)}px Arial`;
+                ctx.fillText(`@${currentUser}`, canvas.width / 2, canvas.height * 0.34);
+            }
+
+            const sliderWidth = Math.min(canvas.width * 0.7, 280);
+            const sliderHeight = 10;
+            const sliderX = canvas.width / 2 - sliderWidth / 2;
+
+            ctx.font = `bold 15px Arial`;
+            ctx.textAlign = 'left';
+            ctx.fillText(t('music', Math.round(bgMusicVolume * 100)), sliderX, canvas.height * 0.38);
+            
+            const musicY = canvas.height * 0.42;
+            ctx.fillStyle = 'rgba(255,255,255,0.2)';
+            ctx.beginPath();
+            ctx.roundRect(sliderX, musicY, sliderWidth, sliderHeight, 5);
+            ctx.fill();
+
+            ctx.fillStyle = '#4ecca3';
+            ctx.beginPath();
+            ctx.roundRect(sliderX, musicY, sliderWidth * bgMusicVolume, sliderHeight, 5);
+            ctx.fill();
+
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillText(t('effects', Math.round(sfxVolume * 100)), sliderX, canvas.height * 0.52);
+            
+            const sfxY = canvas.height * 0.56;
+            ctx.fillStyle = 'rgba(255,255,255,0.2)';
+            ctx.beginPath();
+            ctx.roundRect(sliderX, sfxY, sliderWidth, sliderHeight, 5);
+            ctx.fill();
+
+            ctx.fillStyle = '#4ecca3';
+            ctx.beginPath();
+            ctx.roundRect(sliderX, sfxY, sliderWidth * sfxVolume, sliderHeight, 5);
+            ctx.fill();
+
+            if (logoutConfirm) {
+                ctx.fillStyle = 'rgba(255, 0, 0, 0.15)';
+                ctx.beginPath();
+                ctx.roundRect(canvas.width / 2 - 140, canvas.height * 0.63 - 30, 280, 50, 10);
+                ctx.fill();
+                ctx.fillStyle = '#ff6b6b';
+                ctx.font = `bold 14px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(t('confirm_logout'), canvas.width / 2, canvas.height * 0.63);
+            }
+
+            drawButtons(settingsMenuButtons);
+        }
+
+        function drawLeaderboard() {
+            const fontSizeTitle = Math.max(22, Math.min(canvas.width * 0.065, 34));
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${Math.max(22, fontSizeTitle * 0.7)}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(t('coins', coins), canvas.width / 2, Math.max(20, safeTop + 10));
+
+            ctx.font = `bold ${fontSizeTitle}px Arial`;
+            ctx.textBaseline = 'middle';
+            ctx.fillText(t('leaderboard_title'), canvas.width / 2, canvas.height * 0.10);
+
+            const tableY = canvas.height * 0.16;
+            const colWidth = canvas.width * 0.23;
+            const rowHeight = Math.max(22, Math.min(canvas.height * 0.04, 30));
+            const startX = canvas.width * 0.04;
+
+            ctx.font = `bold ${Math.max(9, Math.min(canvas.width * 0.025, 12))}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = 'rgba(255,215,0,0.8)';
+            
+            ctx.fillText(t('leaderboard_rank'), startX + colWidth * 0.5, tableY);
+            ctx.fillText(t('leaderboard_player'), startX + colWidth * 1.5, tableY);
+            ctx.fillText(t('leaderboard_score'), startX + colWidth * 2.5, tableY);
+            ctx.fillText(t('leaderboard_coins'), startX + colWidth * 3.5, tableY);
+
+            ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(startX, tableY + rowHeight * 0.6);
+            ctx.lineTo(canvas.width - startX, tableY + rowHeight * 0.6);
+            ctx.stroke();
+
+            if (leaderboardLoading) {
+                ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                ctx.font = `${Math.max(14, fontSizeTitle * 0.4)}px Arial`;
+                ctx.fillText(t('leaderboard_loading'), canvas.width / 2, canvas.height * 0.5);
+            } else if (leaderboardError) {
+                ctx.fillStyle = '#ff6b6b';
+                ctx.font = `${Math.max(14, fontSizeTitle * 0.4)}px Arial`;
+                ctx.fillText(leaderboardError, canvas.width / 2, canvas.height * 0.5);
+            } else if (leaderboardData.length === 0) {
+                ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                ctx.font = `${Math.max(14, fontSizeTitle * 0.4)}px Arial`;
+                ctx.fillText(t('leaderboard_empty'), canvas.width / 2, canvas.height * 0.5);
+            } else {
+                const maxDisplay = Math.min(leaderboardData.length, 15);
+                const startY = tableY + rowHeight * 0.8;
+                
+                for (let i = 0; i < maxDisplay; i++) {
+                    const player = leaderboardData[i];
+                    const yPos = startY + i * rowHeight;
+                    
+                    if (currentUser && player.username === currentUser) {
+                        ctx.fillStyle = 'rgba(255, 215, 0, 0.15)';
+                        ctx.beginPath();
+                        ctx.roundRect(startX, yPos - rowHeight * 0.4, canvas.width - startX * 2, rowHeight * 0.8, 4);
+                        ctx.fill();
+                    }
+                    
+                    ctx.fillStyle = (i === 0) ? '#FFD700' : (i === 1) ? '#C0C0C0' : (i === 2) ? '#CD7F32' : 'rgba(255,255,255,0.7)';
+                    ctx.font = `${(i < 3) ? 'bold ' : ''}${Math.max(8, Math.min(canvas.width * 0.022, 11))}px Arial`;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    
+                    let displayName = player.username || 'Unknown';
+                    if (displayName.length > 10) {
+                        displayName = displayName.substring(0, 9) + '…';
+                    }
+                    
+                    ctx.fillText(`#${i + 1}`, startX + colWidth * 0.5, yPos);
+                    ctx.fillText(displayName, startX + colWidth * 1.5, yPos);
+                    ctx.fillText(player.score || 0, startX + colWidth * 2.5, yPos);
+                    ctx.fillText(player.coins || 0, startX + colWidth * 3.5, yPos);
+                }
+            }
+
+            drawButtons(leaderboardButtons);
+        }
+
+        function drawShop() {
+            const fontSizeTitle = Math.max(22, Math.min(canvas.width * 0.065, 34));
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${Math.max(22, fontSizeTitle * 0.7)}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(t('coins', coins), canvas.width / 2, Math.max(20, safeTop + 10));
+
+            ctx.font = `bold ${fontSizeTitle}px Arial`;
+            ctx.textBaseline = 'middle';
+            ctx.fillText(t('shop_title'), canvas.width / 2, canvas.height * 0.28);
+
+            const now = Date.now();
+
+            for (let btn of shopButtons) {
+                let text = btn.text;
+                let disabled = false;
+
+                if (btn.id === 'BUY_TANK') {
+                    if (now < fuelUpgradeExpireTime) {
+                        disabled = true;
+                        const remainingSec = Math.ceil((fuelUpgradeExpireTime - now) / 1000);
+                        const mins = Math.floor(remainingSec / 60);
+                        const secs = remainingSec % 60;
+                        text = t('tank_active', `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`);
+                    } else if (coins < 10) disabled = true;
+                }
+                else if (btn.id === 'BUY_INV') {
+                    if (now < inventoryUpgradeExpireTime) {
+                        disabled = true;
+                        const remainingSec = Math.ceil((inventoryUpgradeExpireTime - now) / 1000);
+                        const mins = Math.floor(remainingSec / 60);
+                        const secs = remainingSec % 60;
+                        text = t('inv_active', `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`);
+                    } else if (coins < inventoryUpgradePrice) disabled = true;
+                    else text = t('buy_inv', inventoryUpgradePrice);
+                }
+
+                drawSingleButton(btn, text, disabled);
+            }
+        }
+
+        function drawSkinsMenu() {
+            const fontSizeTitle = Math.max(22, Math.min(canvas.width * 0.065, 34));
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${Math.max(22, fontSizeTitle * 0.7)}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(t('coins', coins), canvas.width / 2, Math.max(20, safeTop + 10));
+
+            ctx.font = `bold ${fontSizeTitle}px Arial`;
+            ctx.textBaseline = 'middle';
+            ctx.fillText(t('skins_title'), canvas.width / 2, canvas.height * 0.32);
+
+            const skinY = canvas.height * 0.42;
+            const btnWidth = Math.min(canvas.width * 0.75, 280);
+            const btnHeight = Math.max(44, Math.min(canvas.height * 0.075, 54));
+            const spacing = btnHeight * 0.3;
+
+            let yPos = skinY;
+            for (let skinId in SKINS) {
+                const skin = SKINS[skinId];
+                const isActive = currentSkin.toLowerCase() === skin.id.toLowerCase();
+                const isOwned = skin.purchased;
+                const skinName = t(skin.nameKey);
+                
+                if (isOwned) {
+                    ctx.fillStyle = isActive ? 'rgba(255, 215, 0, 0.15)' : 'rgba(255, 255, 255, 0.05)';
+                    ctx.beginPath();
+                    ctx.roundRect(canvas.width / 2 - btnWidth / 2, yPos, btnWidth, btnHeight, 10);
+                    ctx.fill();
+                    
+                    ctx.strokeStyle = isActive ? '#FFD700' : 'rgba(255, 255, 255, 0.2)';
+                    ctx.lineWidth = isActive ? 2 : 1;
+                    ctx.stroke();
+
+                    let displayName = skinName;
+                    if (isActive) displayName = `> ${displayName}`;
+
+                    ctx.fillStyle = isActive ? '#FFD700' : '#FFFFFF';
+                    const btnFontSize = Math.max(12, Math.min(btnHeight * 0.35, 16));
+                    ctx.font = `bold ${btnFontSize}px Arial`;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(displayName, canvas.width / 2, yPos + btnHeight / 2);
+
+                    yPos += btnHeight + spacing;
+                }
+            }
+
+            drawButtons(skinsMenuButtons);
+        }
+
+        function drawSkinsShop() {
+            const fontSizeTitle = Math.max(22, Math.min(canvas.width * 0.065, 34));
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${Math.max(22, fontSizeTitle * 0.7)}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(t('coins', coins), canvas.width / 2, Math.max(20, safeTop + 10));
+
+            ctx.font = `bold ${fontSizeTitle}px Arial`;
+            ctx.textBaseline = 'middle';
+            ctx.fillText(t('skin_shop_title'), canvas.width / 2, canvas.height * 0.28);
+
+            const btnWidth = Math.min(canvas.width * 0.75, 280);
+            const btnHeight = Math.max(44, Math.min(canvas.height * 0.075, 54));
+            const spacing = btnHeight * 0.3;
+
+            const allBought = checkAllSkinsBought();
+
+            if (allBought) {
+                ctx.fillStyle = '#FFD700';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                
+                const msgFontSize = Math.max(14, Math.min(canvas.width * 0.04, 18));
+                ctx.font = `bold ${msgFontSize}px Arial`;
+                
+                const msg = t('all_skins_bought');
+                const maxWidth = canvas.width * 0.85;
+                const words = msg.split(' ');
+                let lines = [];
+                let currentLine = '';
+                
+                for (let word of words) {
+                    const testLine = currentLine + (currentLine ? ' ' : '') + word;
+                    const metrics = ctx.measureText(testLine);
+                    if (metrics.width > maxWidth && currentLine) {
+                        lines.push(currentLine);
+                        currentLine = word;
+                    } else {
+                        currentLine = testLine;
+                    }
+                }
+                if (currentLine) lines.push(currentLine);
+                
+                const lineHeight = msgFontSize * 1.4;
+                const totalHeight = lines.length * lineHeight;
+                const startY = canvas.height * 0.45 - totalHeight / 2;
+                
+                for (let i = 0; i < lines.length; i++) {
+                    ctx.fillText(lines[i], canvas.width / 2, startY + i * lineHeight);
+                }
+            } else {
+                const skinShopStartY = canvas.height * 0.38;
+                let skinIndex = 0;
+                for (let skinId in SKINS) {
+                    const skin = SKINS[skinId];
+                    if (skinId === 'DEFAULT') continue;
+
+                    if (!skin.purchased) {
+                        const yPos = skinShopStartY + skinIndex * (btnHeight + spacing);
+                        const disabled = coins < skin.price;
+                        const text = t('skin_price', t(skin.nameKey), skin.price);
+                        
+                        const tempBtn = { x: canvas.width / 2 - btnWidth / 2, y: yPos, w: btnWidth, h: btnHeight };
+                        drawSingleButton(tempBtn, text, disabled);
+                        skinIndex++;
+                    }
+                }
+            }
+
+            drawButtons(skinsShopButtons);
+        }
+
+        function drawButtons(buttonsList) {
+            for (let btn of buttonsList) {
+                drawSingleButton(btn, btn.text, false);
+            }
+        }
+
+        function drawSingleButton(btn, text, disabled) {
+            const paddingX = 8;
+            const btnWithPadding = { 
+                x: btn.x - paddingX/2, 
+                y: btn.y, 
+                w: btn.w + paddingX, 
+                h: btn.h 
+            };
+
+            ctx.fillStyle = disabled ? 'rgba(100, 100, 100, 0.3)' : 'rgba(255, 255, 255, 0.18)';
+            ctx.beginPath();
+            ctx.roundRect(btnWithPadding.x, btnWithPadding.y, btnWithPadding.w, btnWithPadding.h, 10);
+            ctx.fill();
+
+            ctx.strokeStyle = disabled ? 'rgba(255, 255, 255, 0.2)' : '#FFFFFF';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            ctx.fillStyle = disabled ? '#888888' : '#FFFFFF';
+            let btnFontSize = Math.max(10, Math.min(btn.h * 0.35, 14));
+            if (text.length > 18) {
+                btnFontSize = Math.max(9, btnFontSize * 0.85);
+            }
+            ctx.font = `bold ${btnFontSize}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            
+            let displayText = text;
+            if (text.length > 25) {
+                displayText = text.substring(0, 22) + '...';
+            }
+            ctx.fillText(displayText, btn.x + btn.w / 2, btn.y + btn.h / 2);
+        }
+
+        function drawPauseMenu() {
+            ctx.fillStyle = 'rgba(5, 5, 16, 0.85)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${Math.max(26, canvas.width * 0.065)}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(t('pause'), canvas.width / 2, canvas.height * 0.35);
+
+            drawButtons(pauseMenuButtons);
+        }
+
+        function drawUnpauseCountdown() {
+            const remainingSec = Math.ceil((unpauseEndTime - Date.now()) / 1000);
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = `bold ${Math.max(44, canvas.width * 0.1)}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(remainingSec > 0 ? remainingSec : 'GO!', canvas.width / 2, canvas.height / 2 - 20);
+        }
+
+        function draw() {
+            if (gameState === 'LOGIN_SCREEN') {
+                drawLoginScreen();
+                return;
+            }
+
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#0a0a1a');
+            gradient.addColorStop(0.5, '#0d0d2b');
+            gradient.addColorStop(1, '#050510');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            for (let star of stars) {
+                ctx.fillStyle = `rgba(255, 255, 255, ${star.alpha})`;
+                ctx.beginPath();
+                ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            if (gameState === 'MAIN_MENU') {
+                const menuRocketAngle = Math.cos(menuRocket.time) * 0.12;
+                const skinImagesSet = getCurrentSkinImages();
+                drawRotatedImage(skinImagesSet.fly, menuRocket.x, menuRocket.y, menuRocket.width, menuRocket.height, menuRocketAngle);
+                drawMainMenu();
+            }
+            else if (gameState === 'SETTINGS') {
+                const menuRocketAngle = Math.cos(menuRocket.time) * 0.12;
+                const skinImagesSet = getCurrentSkinImages();
+                drawRotatedImage(skinImagesSet.fly, menuRocket.x, menuRocket.y, menuRocket.width, menuRocket.height, menuRocketAngle);
+                drawSettings();
+            }
+            else if (gameState === 'LEADERBOARD') {
+                const menuRocketAngle = Math.cos(menuRocket.time) * 0.12;
+                const skinImagesSet = getCurrentSkinImages();
+                drawRotatedImage(skinImagesSet.fly, menuRocket.x, menuRocket.y, menuRocket.width, menuRocket.height, menuRocketAngle);
+                drawLeaderboard();
+            }
+            else if (gameState === 'SHOP') {
+                const menuRocketAngle = Math.cos(menuRocket.time) * 0.12;
+                const skinImagesSet = getCurrentSkinImages();
+                drawRotatedImage(skinImagesSet.fly, menuRocket.x, menuRocket.y, menuRocket.width, menuRocket.height, menuRocketAngle);
+                drawShop();
+            }
+            else if (gameState === 'SKINS') {
+                const menuRocketAngle = Math.cos(menuRocket.time) * 0.12;
+                const skinImagesSet = getCurrentSkinImages();
+                drawRotatedImage(skinImagesSet.fly, menuRocket.x, menuRocket.y, menuRocket.width, menuRocket.height, menuRocketAngle);
+                drawSkinsMenu();
+            }
+            else if (gameState === 'SKINS_SHOP') {
+                const menuRocketAngle = Math.cos(menuRocket.time) * 0.12;
+                const skinImagesSet = getCurrentSkinImages();
+                drawRotatedImage(skinImagesSet.fly, menuRocket.x, menuRocket.y, menuRocket.width, menuRocket.height, menuRocketAngle);
+                drawSkinsShop();
+            }
+            else if (gameState === 'WAITING_TO_START') {
+                const skinImagesSet = getCurrentSkinImages();
+                drawRotatedImage(skinImagesSet.idle, rocket.x, rocket.y, rocket.width, rocket.height, 0);
+                drawUI();
+
+                ctx.fillStyle = '#FFFFFF';
+                const hintFont = Math.max(13, Math.min(canvas.width * 0.04, 18));
+                ctx.font = `bold ${hintFont}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(t('tap_to_start'), canvas.width / 2, canvas.height * 0.72);
+            }
+            else if (gameState === 'PLAYING' || gameState === 'UNPAUSING' || gameState === 'PAUSED' || gameState === 'GAMEOVER') {
+                for (let c of canisters) {
+                    drawRotatedImage(imgFuel, c.x, c.y, c.size, c.size, c.angle);
+                }
+
+                for (let coinObj of gameCoinsList) {
+                    const coinImageToDraw = coinObj.isExtra ? imgExstraCoin : imgCoin;
+                    drawRotatedImage(coinImageToDraw, coinObj.x, coinObj.y, coinObj.size, coinObj.size, coinObj.angle);
+                }
+
+                const skinImagesSet = getCurrentSkinImages();
+                const currentTexture = rocket.velocity < 0 ? skinImagesSet.fly : skinImagesSet.idle;
+                drawRotatedImage(currentTexture, rocket.x, rocket.y, rocket.width, rocket.height, rocket.angle);
+
+                drawUI();
+
+                if (gameState === 'PAUSED') drawPauseMenu();
+                if (gameState === 'UNPAUSING') drawUnpauseCountdown();
+
+                if (gameState === 'GAMEOVER') {
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.font = `bold ${Math.max(26, canvas.width * 0.075)}px Arial`;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(t('game_over'), canvas.width / 2, canvas.height / 2 - 30);
+                    
+                    ctx.font = `bold ${Math.max(13, canvas.width * 0.038)}px Arial`;
+                    ctx.fillText(t('tap_to_restart'), canvas.width / 2, canvas.height / 2 + 25);
+                    
+                    ctx.font = `bold ${Math.max(18, canvas.width * 0.05)}px Arial`;
+                    ctx.fillStyle = '#FFD700';
+                    ctx.fillText(t('score', score), canvas.width / 2, canvas.height / 2 - 80);
+                    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                    ctx.font = `${Math.max(14, canvas.width * 0.04)}px Arial`;
+                    ctx.fillText(t('best', bestScore), canvas.width / 2, canvas.height / 2 - 110);
+                }
+            }
+        }
+
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        // === ЗАГРУЗКА ===
+        loadAccounts();
+        loadLocalLeaderboard();
+        
+        const savedUser = localStorage.getItem('flappy_rocket_current_user');
+        if (savedUser && accounts[savedUser]) {
+            currentUser = savedUser;
+            loadUserProgress(savedUser);
+            gameState = 'MAIN_MENU';
+        } else {
+            gameState = 'LOGIN_SCREEN';
+        }
+
+        loadLeaderboard();
+
+        resize();
+        updateMenuButtons();
+        updateLoginButtons();
+        loop();
+
+        window.addEventListener('beforeunload', function() {
+            if (currentUser) {
+                saveUserProgress();
+                localStorage.setItem('flappy_rocket_current_user', currentUser);
+            } else {
+                localStorage.removeItem('flappy_rocket_current_user');
+            }
+        });
+    </script>
+</body>
+</html>
